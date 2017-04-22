@@ -279,12 +279,12 @@
   "Bikesheds your project with totally arbitrary criteria. Returns true if the
   code has been bikeshedded and found wanting."
   [project & opts]
-  (let [source-files (remove
-                      #(starts-with? (.getName %) ".")
-                      (mapcat
-                       #(-> % io/file
-                            (find-sources-in-dir [".clj" ".cljs" ".cljc" ".cljx"]))
-                       (flatten (get-all project :source-paths :test-paths))))
+  (let [source-files (or (:files opts)
+                         (remove
+                           #(starts-with? (.getName %) ".")
+                           (mapcat
+                             #(-> % io/file (find-sources-in-dir [".clj" ".cljs" ".cljc" ".cljx"]))
+                             (flatten (get-all project :source-paths :test-paths)))))
         options (first opts)
         long-lines (if (nil? (:max-line-length options))
                      (long-lines source-files)
