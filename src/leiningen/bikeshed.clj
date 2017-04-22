@@ -37,13 +37,12 @@
        (-> project
            (update-in [:dependencies]
                       conj
-                      ['lein-bikeshed "0.4.2-SNAPSHOT"]))
+                      ['io.dominic/lein-bikeshed "0.1-SNAPSHOT"]))
        `(if (bikeshed.core/bikeshed
-             '~project
-             {:max-line-length (or (:max-line-length ~opts)
-                                   (:max-line-length ~lein-opts))
-              :verbose (:verbose ~opts)}
-             (select-keys ~opts [:max-line-length :verbose]))
+              {:scan-files (bikeshed.core/lein-find-files '~project)
+               :max-line-length (or (:max-line-length ~opts)
+                                    (:max-line-length ~lein-opts))
+               :verbose (:verbose ~opts)})
           (System/exit -1)
           (System/exit 0))
        '(require 'bikeshed.core)))))
