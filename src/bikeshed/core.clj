@@ -2,8 +2,10 @@
   "Define all the functionalities of bikeshed"
   (:require [clojure.string :refer [blank? starts-with? trim join]]
             [clojure.java.io :as io]
+            [clojure.tools.analyzer.jvm :as ana.jvm]
             [clojure.tools.namespace.file :as ns-file]
-            [clojure.tools.namespace.find :as ns-find])
+            [clojure.tools.namespace.find :as ns-find]
+            [clojure.tools.reader :as r])
   (:import (java.io BufferedReader StringReader File)))
 
 (defn foo
@@ -206,32 +208,45 @@
     (catch Throwable t
       (println "Sorry, I wasn't able to read your source files -" t))))
 
-(defn- wrong-arguments
-  "Return the list of wrong arguments for the provided function name"
-  [function-name list-of-forbidden-arguments]
-  (let [arguments (-> function-name meta :arglists)]
-    (distinct (flatten (map (fn [args]
-                              (filter #(some (set [%])
-                                             list-of-forbidden-arguments)
-                                      args))
-                            arguments)))))
+(defn- analysis->args
+  [analysis]
+  (when (contains? analysis :arglists)
+    (into
+      []
+      cat
+      (for [method (get-in analysis [:init :expr :methods])]
+        (for [param (:params method)]
+          {:binding (:form param)
+           :env (select-keys (:env param) [:line :column])})))))
+
+(defn- check-all-arguments-impl
+  [f bad-args]
+  (let [read-form #(r/read % false ::eoferror)
+        r (clojure.lang.LineNumberingPushbackReader. (io/reader f))]
+    (loop [msgs []
+           form (read-form r)]
+      (if-not (= form ::eoferror)
+        (recur
+          (concat msgs
+                  (for [bind (analysis->args (ana.jvm/analyze+eval form))
+                        :when (contains? bad-args (:binding bind))]
+                    (format "%s:%d:%d: \"%s\" is shadowing a core function"
+                            (.getPath f)
+                            (get-in bind [:env :line])
+                            (get-in bind [:env :column])
+                            (:binding bind))))
+          (read-form r))
+        msgs))))
 
 (defn- check-all-arguments
-  "Check if the arguments for functions collide with function from
-  clojure/core. Only works with JVM files (.clj, .cljc)"
   [source-files]
-  (let [core-functions (-> 'clojure.core ns-publics keys)]
-    (doseq [f (filter #(file-with-extension? % ["clj" "cljc" "cljx"]) source-files)]
-      (doseq [function (read-namespace f)
-              :let [bad-args (wrong-arguments function core-functions)
-                    md (meta function)]
-              :when (seq bad-args)]
-        (doseq [bad-arg bad-args]
-          (println (format "%s:%d:%d: Argument \"%s\" collides with clojure.core"
-                           (.getPath f)
-                           (:line md)
-                           (:column md)
-                           bad-arg)))))))
+  (let [core-functions (-> 'clojure.core ns-publics keys set)]
+    (doseq [f source-files]
+      (doseq [msg (try
+                    (check-all-arguments-impl f core-functions)
+                    ;; Catch parsing errors
+                    (catch Throwable _ []))]
+        (println msg)))))
 
 (defn bikeshed
   "Bikesheds your project with totally arbitrary criteria. Returns true if the
