@@ -1,4 +1,4 @@
-(ns foo)
+(ns bikeshed.cljs-test)
 
 (deftest a-test	
   (testing "FIXME, I fail, and I have trailing whitespace!"   

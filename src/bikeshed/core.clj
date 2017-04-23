@@ -117,84 +117,49 @@
   "Complain about lines longer than <max-line-length> characters.
   max-line-length defaults to 80."
   [source-files & {:keys [max-line-length] :or {max-line-length 80}}]
-  (printf "\nChecking for lines longer than %s characters.\n" max-line-length)
-  (let [indexed-lines (fn [f]
-                        (with-open [r (io/reader f)]
-                          (doall
-                           (keep-indexed
-                            (fn [idx line]
-                              (when (> (count line) max-line-length)
-                                (trim (join ":" [(.getAbsolutePath f) (inc idx) line]))))
-                            (line-seq r)))))
-        all-long-lines (flatten (map indexed-lines source-files))]
-    (if (empty? all-long-lines)
-      (println "No lines found.")
-      (do
-        (println "Badly formatted files:")
-        (println (join "\n" all-long-lines))
-        true))))
+  (let [msg (format " Line longer than %s characters." max-line-length)]
+    (doseq [f source-files]
+      (doseq [[idx line] (map-indexed vector (with-open [r (io/reader f)]
+                                               (doall (line-seq r))))
+              :when (> (count line) max-line-length)]
+        (println (join ":" [(.getPath f) (inc idx) 0 msg]))))))
 
 (defn trailing-whitespace
   "Complain about lines with trailing whitespace."
   [source-files]
-  (println "\nChecking for lines with trailing whitespace.")
-  (let [indexed-lines (fn [f]
-                        (with-open [r (io/reader f)]
-                          (doall
-                           (keep-indexed
-                            (fn [idx line]
-                              (when (re-seq #"\s+$" line)
-                                (trim (join ":" [(.getAbsolutePath f) (inc idx) line]))))
-                            (line-seq r)))))
-        trailing-whitespace-lines (flatten (map indexed-lines source-files))]
-    (if (empty? trailing-whitespace-lines)
-      (println "No lines found.")
-      (do (println "Badly formatted files:")
-          (println (join "\n" trailing-whitespace-lines))
-          true))))
+  (doseq [f source-files]
+    (doseq [[idx line] (map-indexed vector (with-open [r (io/reader f)]
+                                             (doall (line-seq r))))
+            :when (re-seq #"\s+$" line)]
+      (println (join ":" [(.getPath f) (inc idx) 0 " Trailing whitespace."])))))
 
 (defn trailing-blank-lines
   "Complain about files ending with blank lines."
   [source-files]
-  (println "\nChecking for files ending in blank lines.")
-  (let [get-last-line (fn [f]
-                        (with-open [r (io/reader f)]
-                          (when (re-matches #"^\s*$" (last (line-seq r)))
-                            (.getAbsolutePath f))))
-        bad-files (filter some? (map get-last-line source-files))]
-    (if (empty? bad-files)
-      (println "No files found.")
-      (do (println "Badly formatted files:")
-          (println (join "\n" bad-files))
-          true))))
+  (doseq [f source-files]
+    (with-open [r (io/reader f)]
+      (let [lines (map-indexed vector (line-seq r))]
+        (doseq [[idx line] (take-while
+                             (comp #(re-matches #"^\s*$" %) second)
+                             (reverse lines))]
+          (println (join ":" [(.getPath f) (inc idx) 0 " Trailing blank line."])))))))
 
 (defn bad-roots
   "Complain about the use of with-redefs."
   [source-files]
-  (println "\nChecking for redefined var roots in source directories.")
-  (let [indexed-lines (fn [f]
-                        (with-open [r (io/reader f)]
-                          (doall
-                           (keep-indexed
-                            (fn [idx line]
-                              (when (re-seq #"\(with-redefs" line)
-                                (trim (join ":" [(.getAbsolutePath f) (inc idx) line]))))
-                            (line-seq r)))))
-        bad-lines (flatten (map indexed-lines source-files))]
-    (if (empty? bad-lines)
-      (println "No with-redefs found.")
-      (do (println "with-redefs found in source directory:")
-          (println (join "\n" bad-lines))
-          true))))
+  (doseq [f source-files]
+    (with-open [r (io/reader f)]
+      (let [lines (map-indexed vector (line-seq r))]
+        (doseq [[idx line] lines
+                :when (re-seq #"\(with-redefs" line)]
+          (println (join ":" [(.getPath f) (inc idx) 0 " Use of with-redefs."])))))))
 
 (defn missing-doc-strings
   "Report the percentage of missing doc strings."
-  [project verbose]
-  (println "\nChecking whether you keep up with your docstrings.")
+  [source-paths verbose]
   (try
-    (let [source-files (mapcat #(-> % io/file
-                                    ns-find/find-clojure-sources-in-dir)
-                               (flatten (get-all project :source-paths)))
+    (let [source-files (mapcat #(-> % io/file ns-find/find-sources-in-dir)
+                               (flatten source-paths))
           all-namespaces (->> source-files
                               (map load-namespace)
                               (remove nil?))
@@ -252,52 +217,45 @@
                             arguments)))))
 
 (defn- check-all-arguments
-  "Check if the arguments for functions collide
-  with function from clojure/core"
-  [project]
-  (println "\nChecking for arguments colliding with clojure.core functions.")
-  (let [core-functions (-> 'clojure.core ns-publics keys)
-        source-files   (mapcat #(-> % io/file
-                                    ns-find/find-clojure-sources-in-dir)
-                               (flatten (get-all project :source-paths)))
-        all-publics    (mapcat read-namespace source-files)]
-    (->> all-publics
-         (map (fn [function]
-                (let [args (wrong-arguments function core-functions)]
-                  (when (seq args)
-                    (if (= 1 (count args))
-                      (println (str function ": '" (first args) "'")
-                               "is colliding with a core function")
-                      (println (str function ": '"
-                                    (clojure.string/join "', '" args) "'")
-                               "are colliding with core functions")))
-                  (count args))))
-         (apply +)
-         (pos?))))
+  "Check if the arguments for functions collide with function from
+  clojure/core. Only works with JVM files (.clj, .cljc)"
+  [source-files]
+  (let [core-functions (-> 'clojure.core ns-publics keys)]
+    (doseq [f (filter #(file-with-extension? % ["clj" "cljc" "cljx"]) source-files)]
+      (doseq [function (read-namespace f)
+              :let [bad-args (wrong-arguments function core-functions)
+                    md (meta function)]
+              :when (seq bad-args)]
+        (doseq [bad-arg bad-args]
+          (println (format "%s:%d:%d: Argument \"%s\" collides with clojure.core"
+                           (.getPath f)
+                           (:line md)
+                           (:column md)
+                           bad-arg)))))))
 
 (defn bikeshed
   "Bikesheds your project with totally arbitrary criteria. Returns true if the
   code has been bikeshedded and found wanting."
-  [project & opts]
-  (let [source-files (or (:files opts)
-                         (remove
-                           #(starts-with? (.getName %) ".")
-                           (mapcat
-                             #(-> % io/file (find-sources-in-dir [".clj" ".cljs" ".cljc" ".cljx"]))
-                             (flatten (get-all project :source-paths :test-paths)))))
-        options (first opts)
-        long-lines (if (nil? (:max-line-length options))
+  [{:keys [max-line-length scan-files]
+    :or {max-line-length 80}}]
+  (let [source-files scan-files
+        long-lines (if (nil? max-line-length)
                      (long-lines source-files)
-                     (long-lines source-files
-                                 :max-line-length
-                                 (:max-line-length options)))
+                     (long-lines source-files :max-line-length max-line-length))
         trailing-whitespace (trailing-whitespace source-files)
         trailing-blank-lines (trailing-blank-lines source-files)
         bad-roots (bad-roots source-files)
-        bad-methods (missing-doc-strings project (:verbose options))
-        bad-arguments (check-all-arguments project)]
-    (or bad-arguments
-        long-lines
-        trailing-whitespace
-        trailing-blank-lines
-        bad-roots)))
+        ;; This is quite slow as it searches the whole project! I think a
+        ;; little rewrite to indicate information in the current namespace may
+        ;; be useful, but I'm uncertain.
+        ;; My Bikeshed doesn't care much for docstrings anyway ;)
+        ;; bad-methods (missing-doc-strings (or (:source-paths project)) (:verbose options))
+        bad-arguments (check-all-arguments source-files)]))
+
+(defn lein-find-files
+  [project]
+  (remove
+    #(starts-with? (.getName %) ".")
+    (mapcat
+      #(-> % io/file (find-sources-in-dir [".clj" ".cljs" ".cljc" ".cljx"]))
+      (flatten (get-all project :source-paths :test-paths)))))
