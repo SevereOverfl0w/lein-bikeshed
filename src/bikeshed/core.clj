@@ -33,31 +33,6 @@
   ([map])
   ([map first]))
 
-(defn file-with-extension?
-  "Returns true if the java.io.File represents a file whose name ends
-  with one of the Strings in extensions."
-  [^java.io.File file extensions]
-  (and (.isFile file)
-       (let [name (.getName file)]
-         (some #(.endsWith name %) extensions))))
-
-(defn- sort-files-breadth-first
-  [files]
-  (sort-by #(.getAbsolutePath ^File %) files))
-
-(defn find-sources-in-dir
-  "Searches recursively under dir for source files. Returns a sequence
-  of File objects, in breadth-first sort order.
-  Optional second argument is either clj (default) or cljs, both
-  defined in clojure.tools.namespace.find."
-  ([dir]
-   (find-sources-in-dir dir nil))
-  ([^File dir extensions]
-   (let [extensions (or extensions [".clj" ".cljc"])]
-     (->> (file-seq dir)
-          (filter #(file-with-extension? % extensions))
-          sort-files-breadth-first))))
-
 (defn- get-all
   "Returns all the values found for the LOOKED-UP-KEY passed as an argument
   recursively walking the MAP-TO-TRAVERSE provided as argument"
@@ -275,5 +250,7 @@
   (remove
     #(starts-with? (.getName %) ".")
     (mapcat
-      #(-> % io/file (find-sources-in-dir [".clj" ".cljs" ".cljc" ".cljx"]))
+      #(ns-find/find-sources-in-dir
+         (io/file %)
+         {:extensions [".clj" ".cljs" ".cljc" ".cljx"]})
       (flatten (get-all project :source-paths :test-paths)))))
