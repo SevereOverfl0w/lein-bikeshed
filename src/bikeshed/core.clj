@@ -221,7 +221,10 @@
 
 (defn- check-all-arguments-impl
   [f bad-args]
-  (let [read-form #(r/read % false ::eoferror)
+  (let [read-form #(r/read {:eof ::eoferror
+                            :read-cond :allow
+                            :features #{:clj}}
+                           %)
         r (clojure.lang.LineNumberingPushbackReader. (io/reader f))]
     (loop [msgs []
            form (read-form r)]
@@ -241,7 +244,7 @@
 (defn- check-all-arguments
   [source-files]
   (let [core-functions (-> 'clojure.core ns-publics keys set)]
-    (doseq [f source-files]
+    (doseq [f (filter ns-file/clojure-file? source-files)]
       (doseq [msg (try
                     (check-all-arguments-impl f core-functions)
                     ;; Catch parsing errors
