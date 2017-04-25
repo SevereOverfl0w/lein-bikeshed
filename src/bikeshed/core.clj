@@ -93,43 +93,48 @@
 (defn long-lines
   "Complain about lines longer than <max-line-length> characters.
   max-line-length defaults to 80."
-  [source-files & {:keys [max-line-length] :or {max-line-length 80}}]
-  (let [msg (format " Line longer than %s characters." max-line-length)]
-    (doseq [f source-files]
-      (doseq [[idx line] (map-indexed vector (with-open [r (io/reader f)]
-                                               (doall (line-seq r))))
-              :when (> (count line) max-line-length)]
-        (println (join ":" [(.getPath f) (inc idx) 0 msg]))))))
+  ([reader] (long-lines reader {}))
+  ([reader {:keys [max-line-length] :or {max-line-length 80}}]
+   (let [msg (format "Line longer than %d characters." max-line-length)]
+     (for [[idx line] (map-indexed vector
+                                   (with-open [r reader]
+                                     (doall (line-seq r))))
+           :when (> (count line) max-line-length)]
+       {:line (inc idx)
+        :column 0
+        :message msg}))))
 
 (defn trailing-whitespace
   "Complain about lines with trailing whitespace."
-  [source-files]
-  (doseq [f source-files]
-    (doseq [[idx line] (map-indexed vector (with-open [r (io/reader f)]
-                                             (doall (line-seq r))))
-            :when (re-seq #"\s+$" line)]
-      (println (join ":" [(.getPath f) (inc idx) 0 " Trailing whitespace."])))))
+  [reader]
+  (for [[idx line] (map-indexed vector (with-open [r reader]
+                                         (doall (line-seq r))))
+        :when (re-seq #"\s+$" line)]
+    {:line (inc idx)
+     :column 0
+     :message "Trailing whitespace."}))
 
 (defn trailing-blank-lines
   "Complain about files ending with blank lines."
-  [source-files]
-  (doseq [f source-files]
-    (with-open [r (io/reader f)]
-      (let [lines (map-indexed vector (line-seq r))]
-        (doseq [[idx line] (take-while
-                             (comp #(re-matches #"^\s*$" %) second)
-                             (reverse lines))]
-          (println (join ":" [(.getPath f) (inc idx) 0 " Trailing blank line."])))))))
+  [reader]
+  (let [lines (map-indexed vector (with-open [r reader]
+                                    (doall (line-seq r))))]
+    (for [[idx line] (take-while
+                       (comp #(re-matches #"^\s*$" %) second)
+                       (reverse lines))]
+      {:line (inc idx)
+       :column 0
+       :message "Trailing blank line."})))
 
 (defn bad-roots
   "Complain about the use of with-redefs."
-  [source-files]
-  (doseq [f source-files]
-    (with-open [r (io/reader f)]
-      (let [lines (map-indexed vector (line-seq r))]
-        (doseq [[idx line] lines
-                :when (re-seq #"\(with-redefs" line)]
-          (println (join ":" [(.getPath f) (inc idx) 0 " Use of with-redefs."])))))))
+  [reader]
+  (for [[idx line] (map-indexed vector (with-open [r reader]
+                                         (doall (line-seq r))))
+        :when (re-seq #"\(with-redefs" line)]
+    {:line (inc idx)
+     :column 0
+     :message "Use of with-redefs."}))
 
 (defn missing-doc-strings
   "Report the percentage of missing doc strings."
@@ -195,55 +200,61 @@
            :env (select-keys (:env param) [:line :column])})))))
 
 (defn- check-all-arguments-impl
-  [f bad-args]
-  (let [read-form #(r/read {:eof ::eoferror
-                            :read-cond :allow
-                            :features #{:clj}}
-                           %)
-        r (clojure.lang.LineNumberingPushbackReader. (io/reader f))]
-    (loop [msgs []
-           form (read-form r)]
-      (if-not (= form ::eoferror)
-        (recur
-          (concat msgs
-                  (for [bind (analysis->args (ana.jvm/analyze+eval form))
-                        :when (contains? bad-args (:binding bind))]
-                    (format "%s:%d:%d: \"%s\" is shadowing a core function"
-                            (.getPath f)
-                            (get-in bind [:env :line])
-                            (get-in bind [:env :column])
-                            (:binding bind))))
-          (read-form r))
-        msgs))))
+  [reader {:keys [bad-args] :as preamble}]
+  (try
+    (let [read-form #(r/read {:eof ::eoferror
+                              :read-cond :allow
+                              :features #{:clj}}
+                             %)
+          r (clojure.lang.LineNumberingPushbackReader. reader)]
+      (loop [msgs []
+             form (read-form r)]
+        (if-not (= form ::eoferror)
+          (recur
+            (concat msgs
+                    (for [bind (analysis->args (ana.jvm/analyze+eval form))
+                          :when (contains? bad-args (:binding bind))]
+                      {:line (get-in bind [:env :line])
+                       :column (get-in bind [:env :column])
+                       :message (format "\"%s\" is shadowing a core function" (:binding bind))}))
+            (read-form r))
+          msgs)))
+    (catch Throwable _ [])))
 
-(defn- check-all-arguments
-  [source-files]
-  (let [core-functions (-> 'clojure.core ns-publics keys set)]
-    (doseq [f (filter ns-file/clojure-file? source-files)]
-      (doseq [msg (try
-                    (check-all-arguments-impl f core-functions)
-                    ;; Catch parsing errors
-                    (catch Throwable _ []))]
-        (println msg)))))
+(defn- check-all-arguments-preamble
+  "Reader must be a clojure file, this function does not work on clojurescript
+  (yet™)"
+  []
+  {:bad-args (-> 'clojure.core ns-publics keys set)})
+
+(defn unix-reporter
+  [file reports]
+  (let [path (.getPath file)]
+    (doseq [{:keys [line column message]} reports]
+      ;; TODO: There's some really strange bug here causing nothing to happen
+      ;; unless this is a println! It deserves a deeper investigation
+      ;;(printf "%s:%d:%d: %s\n" path line column message)
+      (println (format "%s:%d:%d: %s" path line column message)))))
 
 (defn bikeshed
   "Bikesheds your project with totally arbitrary criteria. Returns true if the
   code has been bikeshedded and found wanting."
-  [{:keys [max-line-length scan-files]
-    :or {max-line-length 80}}]
-  (let [source-files scan-files
-        long-lines (if (nil? max-line-length)
-                     (long-lines source-files)
-                     (long-lines source-files :max-line-length max-line-length))
-        trailing-whitespace (trailing-whitespace source-files)
-        trailing-blank-lines (trailing-blank-lines source-files)
-        bad-roots (bad-roots source-files)
-        ;; This is quite slow as it searches the whole project! I think a
-        ;; little rewrite to indicate information in the current namespace may
-        ;; be useful, but I'm uncertain.
-        ;; My Bikeshed doesn't care much for docstrings anyway ;)
-        ;; bad-methods (missing-doc-strings (or (:source-paths project)) (:verbose options))
-        bad-arguments (check-all-arguments source-files)]))
+  [{:keys [max-line-length scan-files reporter]
+    :or {max-line-length 80
+         reporter unix-reporter}}]
+  (let [arguments-preamble (check-all-arguments-preamble)]
+    (doseq [file scan-files]
+      (reporter
+        file
+        (concat
+          (if (nil? max-line-length)
+            (long-lines (io/reader file))
+            (long-lines (io/reader file) :max-line-length max-line-length))
+          (trailing-whitespace (io/reader file))
+          (trailing-blank-lines (io/reader file))
+          (bad-roots (io/reader file))
+          (when (ns-file/clojure-file? file)
+            (check-all-arguments-impl (io/reader file) arguments-preamble)))))))
 
 (defn lein-find-files
   [project]
